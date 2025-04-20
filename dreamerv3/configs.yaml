@@ -87,7 +87,7 @@ defaults:
     opt: {lr: 4e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
     ac_grads: False
     
-    augmented_encode: False
+    augmented_encode: True
     encoder_augmentations:
       bounding_box: {crop_rate: 2}
     N_encoder_augmentations: 8

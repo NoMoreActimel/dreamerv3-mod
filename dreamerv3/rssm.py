@@ -84,15 +84,22 @@ class RSSM(nj.Module):
     print(f"action.shape: {action.shape}.")
       
     deter = self._core(deter, stoch, action)
-    
+
+    print(f"Dynamics initial tokens.shape: {tokens.shape}")
     tokens = tokens.reshape((*deter.shape[:-1], -1))
+    print(f"Dynamics tokens.shape after reshape deter.shape[:-1]: {tokens.shape}")
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
-    
+    print(f"Dynamics x.shape after concat with deter: {x.shape}")
+
+    # TO-DO: ADD CROSS-ATTENTION HERE ?
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      print(f"Dynamics x.shape after obslayer {i + 1} / {self.obslayers}: {x.shape}")
     
     logit = self._logit('obslogit', x)
+    print(f"Dynamics final logit.shape: {logit.shape}")
+    
     stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
@@ -216,10 +223,17 @@ class Encoder(nj.Module):
   def truncate(self, entries, carry=None):
     return {}
 
-  def __call__(self, carry, obs, reset, training, single=False):
+  def __call__(self, carry, obs, reset, training, single=False, augmented=False):
     bdims = 1 if single else 2
     outs = []
     bshape = reset.shape
+    
+    if augmented:
+      bdims = bdims + 1
+      bshape = bshape + (obs[self.imgkeys[0]].shape[2], )
+      
+    print(f"bdims: {bdims}, bshape: {bshape}")
+    print(type(bshape))
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -236,8 +250,12 @@ class Encoder(nj.Module):
       K = self.kernel
       imgs = [obs[k] for k in sorted(self.imgkeys)]
       assert all(x.dtype == jnp.uint8 for x in imgs)
+
       x = nn.cast(jnp.concatenate(imgs, -1), force=True) / 255 - 0.5
+      print(f"x before reshape bdims: {x.shape}")
       x = x.reshape((-1, *x.shape[bdims:]))
+      print(f"x after reshape bdims: {x.shape}")
+      
       for i, depth in enumerate(self.depths):
         if self.outer and i == 0:
           x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
@@ -248,13 +266,17 @@ class Encoder(nj.Module):
           B, H, W, C = x.shape
           x = x.reshape((B, H // 2, 2, W // 2, 2, C)).max((2, 4))
         x = nn.act(self.act)(self.sub(f'cnn{i}norm', nn.Norm, self.norm)(x))
+        print(f"x after layer {i + 1} / {len(self.depths)}: {x.shape}")
       assert 3 <= x.shape[-3] <= 16, x.shape
       assert 3 <= x.shape[-2] <= 16, x.shape
       x = x.reshape((x.shape[0], -1))
+      print(f"x after reshape(x.shape[0], -1): {x.shape}")
       outs.append(x)
 
     x = jnp.concatenate(outs, -1)
+    print(f"x after concat on -1: {x.shape}")
     tokens = x.reshape((*bshape, *x.shape[1:]))
+    print(f"x after reshaping back to bshape: {tokens.shape}")
     entries = {}
     return carry, entries, tokens
 
@@ -294,11 +316,17 @@ class Decoder(nj.Module):
   def truncate(self, entries, carry=None):
     return {}
 
-  def __call__(self, carry, feat, reset, training, single=False):
+  def __call__(self, carry, feat, reset, training, single=False, augmented=False):
     assert feat['deter'].shape[-1] % self.bspace == 0
     K = self.kernel
     recons = {}
     bshape = reset.shape
+
+    print("feat.shape:", [feat[k].shape for k in ('stoch', 'deter')])
+    
+    if augmented:
+      bshape = bshape + (feat['deter'].shape[2], )
+    
     inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
@@ -357,6 +385,7 @@ class Decoder(nj.Module):
         x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
       x = jax.nn.sigmoid(x)
       x = x.reshape((*bshape, *x.shape[1:]))
+      print(f"Final x.shape in decoder: {x.shape}")
       split = np.cumsum(
           [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])
       for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):

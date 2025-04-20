@@ -113,21 +113,23 @@ class Agent(embodied.jax.Agent):
     self.augmentations = {}
     for imgkey in self.imgkeys:
       H, W, C = self.enc.obs_space[imgkey].shape[-3:]
-      self.augmentations[k] = []
+      self.augmentations[imgkey] = []
       for name, kwargs in augmentation_names_kwargs.items():
         for _ in range(N_augmentations):
-          self.augmentations[k].append(self.get_aug(H, W, C, name, kwargs))
+          self.augmentations[imgkey].append(self.get_aug(H, W, C, name, kwargs))
   
   @staticmethod
   def get_aug(H, W, C, aug_name, aug_kwargs):
-    def get_aug_bounding_box(aug_kwargs):
-      crop_rate = aug_kwargs["crop_rate"]
+    def get_aug_bounding_box(crop_rate):
       crop_h, crop_w = H // crop_rate, W // crop_rate
 
       # sample x, y only on augmentation function creation
-      key = nj.seed()
-      y = int(jax.random.randint(key, (), 0, H - crop_h + 1))
-      x = int(jax.random.randint(key, (), 0, W - crop_w + 1))
+      # key = nj.seed()
+      # y = int(jax.random.randint(key, (), 0, H - crop_h + 1))
+      # x = int(jax.random.randint(key, (), 0, W - crop_w + 1))
+      y = np.random.randint(0, H - crop_h + 1)
+      x = np.random.randint(0, W - crop_w + 1)
+
     
       def aug(imgs, y=y, x=x, ch=crop_h, cw=crop_w):
         crop = imgs[..., y:y+ch, x:x+cw, :]
@@ -142,8 +144,11 @@ class Agent(embodied.jax.Agent):
       return aug
 
     locals_dict = locals()
-    aug = locals_dict.get(f"get_aug_{aug_name}", None)
-    assert aug is not None, f"Augmentation {aug_name} not found!"
+    get_aug_by_name = locals_dict.get(f"get_aug_{aug_name}", None)
+    assert get_aug_by_name is not None, f"Augmentation {aug_name} not found!"
+    
+    aug = get_aug_by_name(**aug_kwargs)
+    print("AUG Function:", type(aug), aug)
     return aug
 
   def init_policy(self, batch_size):
@@ -164,12 +169,12 @@ class Agent(embodied.jax.Agent):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
-    enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
+    enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, augmented=self.augmented_encode, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, **kw)
     dec_entry = {}
     if dec_carry:
-      dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
+      dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, augmented=self.augmented_encode, **kw)
     policy = self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
@@ -195,9 +200,14 @@ class Agent(embodied.jax.Agent):
 
       # WE WANT TO ADD K AUGMENTATIONS BY DIM = 2, RESULTING SHAPE SHOULD BE:
       # (1, 64, K + 1, 96, 96, 1)
-      imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations] # IS IT OK TO USE + HERE?
+      imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations[k]] # IS IT OK TO USE + HERE?
       imgs_k_aug = [jnp.expand_dims(c, axis=2) for c in imgs_k_aug]
       imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=2)
+
+      # in case we want to compress A and C (but we want separate processing of augmentations in encoder):
+      # B, T, H, W, A, C = imgs_k_aug.shape
+      # imgs_k_aug = imgs_k_aug.reshape(B, T, H, W, A * C)
+
       print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")
       
       obs[k] = imgs_k_aug
@@ -217,7 +227,7 @@ class Agent(embodied.jax.Agent):
     for k in sorted(self.imgkeys):
       print(k, obs[k].shape)
 
-    if self.config.augmented_encode:
+    if self.augmented_encode:
       self._apply_augmentations(obs)
 
     metrics, (carry, entries, outs, mets) = self.opt(
@@ -244,36 +254,38 @@ class Agent(embodied.jax.Agent):
     losses = {}
     metrics = {}
 
-    print("enc_carry:", type(enc_carry), enc_carry)
-    print("dyn_carry:", type(dyn_carry), dyn_carry)
-    print("dec_carry:", type(dec_carry), dec_carry)
+    # print("enc_carry:", type(enc_carry), enc_carry)
+    # print("dyn_carry:", type(dyn_carry), dyn_carry)
+    # print("dec_carry:", type(dec_carry), dec_carry)
 
     print("obs:", obs)
 
     # World model
     enc_carry, enc_entries, tokens = self.enc(
-        enc_carry, obs, reset, training)
+        enc_carry, obs, reset, training, augmented=self.augmented_encode
+    )
     
     print("after encoder:")
-    print("enc_carry:", enc_carry)
-    print("enc_entries:", enc_entries)
+    # print("enc_carry:", enc_carry)
+    # print("enc_entries:", enc_entries)
     print("tokens:", tokens)
 
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
         dyn_carry, tokens, prevact, reset, training)
 
-    print("after dynamics:")
-    print("dyn_carry:", dyn_carry)
-    print("dyn_entries:", dyn_entries)
-    print("los:", los)
-    print("repfeat:", repfeat)
-    print("mets:", mets)
+    # print("after dynamics:")
+    # print("dyn_carry:", dyn_carry)
+    # print("dyn_entries:", dyn_entries)
+    # print("los:", los)
+    # print("repfeat:", repfeat)
+    # print("mets:", mets)
     
     losses.update(los)
     metrics.update(mets)
 
     dec_carry, dec_entries, recons = self.dec(
-        dec_carry, repfeat, reset, training)
+        dec_carry, repfeat, reset, training, augmented=self.augmented_encode
+    )
 
     print("after decoder:")
     print("dec_carry:", dec_carry)
