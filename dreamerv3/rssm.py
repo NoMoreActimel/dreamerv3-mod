@@ -77,12 +77,21 @@ class RSSM(nj.Module):
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
+
+    print(f"Before dynamics._core call:")
+    print(f"deter.shape: {deter.shape},")
+    print(f"stoch.shape: {stoch.shape},")
+    print(f"action.shape: {action.shape}.")
+      
     deter = self._core(deter, stoch, action)
+    
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
+    
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+    
     logit = self._logit('obslogit', x)
     stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
     carry = dict(deter=deter, stoch=stoch)

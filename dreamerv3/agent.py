@@ -48,6 +48,12 @@ class Agent(embodied.jax.Agent):
         'simple': rssm.Decoder,
     }[config.dec.typ](dec_space, **config.dec[config.dec.typ], name='dec')
 
+    # FOR ENCODER AUGMENTATIONS:
+    self.augmented_encode = self.config.augmented_encode
+    self.imgkeys = [k for k, s in enc_space.items() if len(s.shape) == 3] # self.enc.imgkeys
+    if self.augmented_encode:
+      self.augmentions = self.create_augmentations()
+    
     self.feat2tensor = lambda x: jnp.concatenate([
         nn.cast(x['deter']),
         nn.cast(x['stoch'].reshape((*x['stoch'].shape[:-2], -1)))], -1)
@@ -98,6 +104,48 @@ class Agent(embodied.jax.Agent):
           dec=self.dec.entry_space)))
     return spaces
 
+  def create_augmentations(self):
+    augmentation_names_kwargs = getattr(self.config, "encoder_augmentations",
+      {"bounding_box": {"crop_rate": 2}}
+    )
+    N_augmentations = getattr(self.config, "N_encoder_augmentations", 10)
+
+    self.augmentations = {}
+    for imgkey in self.imgkeys:
+      H, W, C = self.enc.obs_space[imgkey].shape[-3:]
+      self.augmentations[k] = []
+      for name, kwargs in augmentation_names_kwargs.items():
+        for _ in range(N_augmentations):
+          self.augmentations[k].append(self.get_aug(H, W, C, name, kwargs))
+  
+  @staticmethod
+  def get_aug(H, W, C, aug_name, aug_kwargs):
+    def get_aug_bounding_box(aug_kwargs):
+      crop_rate = aug_kwargs["crop_rate"]
+      crop_h, crop_w = H // crop_rate, W // crop_rate
+
+      # sample x, y only on augmentation function creation
+      key = nj.seed()
+      y = int(jax.random.randint(key, (), 0, H - crop_h + 1))
+      x = int(jax.random.randint(key, (), 0, W - crop_w + 1))
+    
+      def aug(imgs, y=y, x=x, ch=crop_h, cw=crop_w):
+        crop = imgs[..., y:y+ch, x:x+cw, :]
+        
+        # resize back to (H, W)
+        # jax.image.resize wants floats, so cast to f32, resize, then back to uint8
+        crop_f = crop.astype(f32) / 255.0
+        out = jax.image.resize(crop_f, imgs.shape, method='bilinear')
+        out = (out * 255).astype(np.uint8)
+
+        return out
+      return aug
+
+    locals_dict = locals()
+    aug = locals_dict.get(f"get_aug_{aug_name}", None)
+    assert aug is not None, f"Augmentation {aug_name} not found!"
+    return aug
+
   def init_policy(self, batch_size):
     zeros = lambda x: jnp.zeros((batch_size, *x.shape), x.dtype)
     return (
@@ -134,8 +182,44 @@ class Agent(embodied.jax.Agent):
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
     return carry, act, out
 
+  def _apply_augmentations(self, obs):
+    imgs = {k: obs[k] for k in sorted(self.imgkeys)}
+
+    for k, imgs_k in imgs.items():
+      # EACH IMG IS IN FACT A SEQUENCE OF IMAGES THAT HAS SHAPE: (1, 64, 96, 96, 1)
+      # Traced<ShapedArray(uint8[1,64,96,96,1])
+      # BATCH_SIZE: 1
+      # LENGTH: 64
+      # H x W: (96, 96)
+      # COLOR CHANNELS: 1
+
+      # WE WANT TO ADD K AUGMENTATIONS BY DIM = 2, RESULTING SHAPE SHOULD BE:
+      # (1, 64, K + 1, 96, 96, 1)
+      imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations] # IS IT OK TO USE + HERE?
+      imgs_k_aug = [jnp.expand_dims(c, axis=2) for c in imgs_k_aug]
+      imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=2)
+      print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")
+      
+      obs[k] = imgs_k_aug
+
   def train(self, carry, data):
+    # print("before apply context:")
+    # print("carry:", type(carry), carry)
+    # print("data:", type(data), data)
+    
     carry, obs, prevact, stepid = self._apply_replay_context(carry, data)
+    
+    # print("after apply context:")
+    # print("carry:", type(carry), carry)
+    # print("data:", type(data), data)
+
+    print(self.imgkeys)
+    for k in sorted(self.imgkeys):
+      print(k, obs[k].shape)
+
+    if self.config.augmented_encode:
+      self._apply_augmentations(obs)
+
     metrics, (carry, entries, outs, mets) = self.opt(
         self.loss, carry, obs, prevact, training=True, has_aux=True)
     metrics.update(mets)
@@ -160,15 +244,42 @@ class Agent(embodied.jax.Agent):
     losses = {}
     metrics = {}
 
+    print("enc_carry:", type(enc_carry), enc_carry)
+    print("dyn_carry:", type(dyn_carry), dyn_carry)
+    print("dec_carry:", type(dec_carry), dec_carry)
+
+    print("obs:", obs)
+
     # World model
     enc_carry, enc_entries, tokens = self.enc(
         enc_carry, obs, reset, training)
+    
+    print("after encoder:")
+    print("enc_carry:", enc_carry)
+    print("enc_entries:", enc_entries)
+    print("tokens:", tokens)
+
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
         dyn_carry, tokens, prevact, reset, training)
+
+    print("after dynamics:")
+    print("dyn_carry:", dyn_carry)
+    print("dyn_entries:", dyn_entries)
+    print("los:", los)
+    print("repfeat:", repfeat)
+    print("mets:", mets)
+    
     losses.update(los)
     metrics.update(mets)
+
     dec_carry, dec_entries, recons = self.dec(
         dec_carry, repfeat, reset, training)
+
+    print("after decoder:")
+    print("dec_carry:", dec_carry)
+    print("dec_entries:", dec_entries)
+    print("recons:", recons)
+    
     inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
     losses['rew'] = self.rew(inp, 2).loss(obs['reward'])
     con = f32(~obs['is_terminal'])
