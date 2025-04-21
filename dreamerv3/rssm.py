@@ -286,7 +286,7 @@ class Encoder(nj.Module):
     
     if self.use_augmentations:
       bdims = bdims + 1
-      bshape = bshape + (obs[self.imgkeys[0]].shape[2], )
+      bshape = bshape + (obs[self.imgkeys[0]].shape[bdims - 1], )
 
     # print("Encoder __call__")
     # print(f"bdims: {bdims}, bshape: {bshape}")

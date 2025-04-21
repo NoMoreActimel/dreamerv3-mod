@@ -173,6 +173,15 @@ class Agent(embodied.jax.Agent):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
+      
+    # print("POLICY CALL")
+    # print(f"obs['image'].shape: {obs['image'].shape}")
+    # print(f"obs['is_first'].shape: {obs['is_first'].shape}")
+    if self.augmented_encode:
+      self._apply_augmentations(obs)
+    # print(f"obs['image'].shape: {obs['image'].shape}")
+    # print(f"obs['is_first'].shape: {obs['is_first'].shape}")
+
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, **kw)
@@ -204,9 +213,13 @@ class Agent(embodied.jax.Agent):
 
       # WE WANT TO ADD K AUGMENTATIONS BY DIM = 2, RESULTING SHAPE SHOULD BE:
       # (1, 64, K + 1, 96, 96, 1)
+      # IN CASE OF 4-DIMENSIONAL INPUT, IT IS DIM = 1 (WITHOUT LAST H + W + C)
+      
       imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations[k]]
-      imgs_k_aug = [jnp.expand_dims(c, axis=2) for c in imgs_k_aug]
-      imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=2)
+      
+      aug_axis = len(imgs_k.shape) - 3
+      imgs_k_aug = [jnp.expand_dims(c, axis=aug_axis) for c in imgs_k_aug]
+      imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=aug_axis)
 
       # in case we want to compress A and C (but we want separate processing of augmentations in encoder):
       # B, T, H, W, A, C = imgs_k_aug.shape
@@ -231,8 +244,11 @@ class Agent(embodied.jax.Agent):
     # for k in sorted(self.imgkeys):
     #   print(k, obs[k].shape)
 
+    # print("TRAIN")
+    # print(f"obs['image'].shape: {obs['image'].shape}")
     if self.augmented_encode:
       self._apply_augmentations(obs)
+    # print(f"obs['image'].shape: {obs['image'].shape}")
 
     metrics, (carry, entries, outs, mets) = self.opt(
         self.loss, carry, obs, prevact, training=True, has_aux=True)
