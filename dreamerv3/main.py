@@ -170,8 +170,9 @@ def make_logger(config):
       outputs.append(elements.logger.ExpaOutput(
           exp, run, proj, config.logger.user, config.flat))
     elif output == 'wandb':
-      name = '/'.join(logdir.split('/')[-4:])
-      outputs.append(elements.logger.WandBOutput(name))
+      name = config.logger.get('wandb_run_name', '/'.join(logdir.split('/')[-4:]))
+      project_name = config.logger.get('wandb_project_name', None)
+      outputs.append(elements.logger.WandBOutput(name, project=project_name))
     elif output == 'scope':
       outputs.append(elements.logger.ScopeOutput(elements.Path(logdir)))
     else:

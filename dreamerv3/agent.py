@@ -105,10 +105,14 @@ class Agent(embodied.jax.Agent):
     return spaces
 
   def create_augmentations(self):
-    augmentation_names_kwargs = getattr(self.config, "encoder_augmentations",
+    augmentation_names_kwargs = getattr(
+      self.config,
+      "encoder_augmentations",
       {"bounding_box": {"crop_rate": 2}}
     )
-    N_augmentations = getattr(self.config, "N_encoder_augmentations", 10)
+    N_augmentations = self.dec.aug_channels - 1
+
+    print(F"TRAINING WITH {N_augmentations} BOUNDING BOX AUGMENTATIONS")
 
     self.augmentations = {}
     for imgkey in self.imgkeys:
@@ -148,7 +152,7 @@ class Agent(embodied.jax.Agent):
     assert get_aug_by_name is not None, f"Augmentation {aug_name} not found!"
     
     aug = get_aug_by_name(**aug_kwargs)
-    print("AUG Function:", type(aug), aug)
+    # print("AUG Function:", type(aug), aug)
     return aug
 
   def init_policy(self, batch_size):
@@ -169,12 +173,12 @@ class Agent(embodied.jax.Agent):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
-    enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, augmented=self.augmented_encode, **kw)
+    enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, **kw)
     dec_entry = {}
     if dec_carry:
-      dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, augmented=self.augmented_encode, **kw)
+      dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
     policy = self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
@@ -200,7 +204,7 @@ class Agent(embodied.jax.Agent):
 
       # WE WANT TO ADD K AUGMENTATIONS BY DIM = 2, RESULTING SHAPE SHOULD BE:
       # (1, 64, K + 1, 96, 96, 1)
-      imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations[k]] # IS IT OK TO USE + HERE?
+      imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations[k]]
       imgs_k_aug = [jnp.expand_dims(c, axis=2) for c in imgs_k_aug]
       imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=2)
 
@@ -208,7 +212,7 @@ class Agent(embodied.jax.Agent):
       # B, T, H, W, A, C = imgs_k_aug.shape
       # imgs_k_aug = imgs_k_aug.reshape(B, T, H, W, A * C)
 
-      print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")
+      # print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")
       
       obs[k] = imgs_k_aug
 
@@ -223,9 +227,9 @@ class Agent(embodied.jax.Agent):
     # print("carry:", type(carry), carry)
     # print("data:", type(data), data)
 
-    print(self.imgkeys)
-    for k in sorted(self.imgkeys):
-      print(k, obs[k].shape)
+    # print(self.imgkeys)
+    # for k in sorted(self.imgkeys):
+    #   print(k, obs[k].shape)
 
     if self.augmented_encode:
       self._apply_augmentations(obs)
@@ -258,17 +262,19 @@ class Agent(embodied.jax.Agent):
     # print("dyn_carry:", type(dyn_carry), dyn_carry)
     # print("dec_carry:", type(dec_carry), dec_carry)
 
-    print("obs:", obs)
+    # print("obs:", obs)
+    # print()
 
     # World model
     enc_carry, enc_entries, tokens = self.enc(
-        enc_carry, obs, reset, training, augmented=self.augmented_encode
+        enc_carry, obs, reset, training
     )
     
-    print("after encoder:")
+    # print("after encoder:")
     # print("enc_carry:", enc_carry)
     # print("enc_entries:", enc_entries)
-    print("tokens:", tokens)
+    # print("tokens:", tokens)
+    # print()
 
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
         dyn_carry, tokens, prevact, reset, training)
@@ -287,10 +293,11 @@ class Agent(embodied.jax.Agent):
         dec_carry, repfeat, reset, training, augmented=self.augmented_encode
     )
 
-    print("after decoder:")
-    print("dec_carry:", dec_carry)
-    print("dec_entries:", dec_entries)
-    print("recons:", recons)
+    # print("after decoder:")
+    # print("dec_carry:", dec_carry)
+    # print("dec_entries:", dec_entries)
+    # print("recons:", recons)
+    # print()
     
     inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
     losses['rew'] = self.rew(inp, 2).loss(obs['reward'])
@@ -298,14 +305,21 @@ class Agent(embodied.jax.Agent):
     if self.config.contdisc:
       con *= 1 - 1 / self.config.horizon
     losses['con'] = self.con(self.feat2tensor(repfeat), 2).loss(con)
+
+    # print("Reconstruction loss:")
     for key, recon in recons.items():
       space, value = self.obs_space[key], obs[key]
+      # print(key, space, value.shape)
       assert value.dtype == space.dtype, (key, space, value.dtype)
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
 
+      if self.augmented_encode:
+        losses[key] = losses[key].mean(2)
+
     B, T = reset.shape
     shapes = {k: v.shape for k, v in losses.items()}
+    # print("loss shapes:", shapes)
     assert all(x == (B, T) for x in shapes.values()), ((B, T), shapes)
 
     # Imagination
@@ -377,6 +391,9 @@ class Agent(embodied.jax.Agent):
     RB = min(6, B)
     metrics = {}
 
+    if self.augmented_encode:
+      self._apply_augmentations(obs)
+      
     # Train metrics
     _, (new_carry, entries, outs, mets) = self.loss(
         carry, obs, prevact, training=False)
@@ -413,24 +430,45 @@ class Agent(embodied.jax.Agent):
     for key in self.dec.imgkeys:
       assert obs[key].dtype == jnp.uint8
       true = obs[key][:RB]
-      pred = jnp.concatenate([obsrecons[key].pred(), imgrecons[key].pred()], 1)
+
+      obsrecon_pred, imgrecon_pred = obsrecons[key].pred(), imgrecons[key].pred()
+      
+      if self.augmented_encode:
+        aug_channels = self.dec.aug_channels
+        # print(f"obsrecon_pred.shape: {obsrecon_pred.shape}")
+        # print(f"imgrecon_pred.shape: {imgrecon_pred.shape}")
+        
+        for i in range(aug_channels):
+          obsrecon_pred_i = obsrecon_pred[:, :, i, :, :, :]
+          imgrecon_pred_i = imgrecon_pred[:, :, i, :, :, :]
+          true_i = true[:, :, i, :, :, :]
+          key_i = f"{key}_aug_{i}"
+          self._add_video_preds(metrics, true_i, obsrecon_pred_i, imgrecon_pred_i, key_i)
+      else:
+        self._add_video_preds(metrics, true, obsrecon_pred, imgrecon_pred, key)
+
+    carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
+    return carry, metrics
+
+  def _add_video_preds(self, metrics, true, obsrecon_pred, imgrecon_pred, key):
+      pred = jnp.concatenate([obsrecon_pred, imgrecon_pred], 1)
       pred = jnp.clip(pred * 255, 0, 255).astype(jnp.uint8)
       error = ((i32(pred) - i32(true) + 255) / 2).astype(np.uint8)
       video = jnp.concatenate([true, pred, error], 2)
 
       video = jnp.pad(video, [[0, 0], [0, 0], [2, 2], [2, 2], [0, 0]])
       mask = jnp.zeros(video.shape, bool).at[:, :, 2:-2, 2:-2, :].set(True)
+    
+      T = pred.shape[1]
       border = jnp.full((T, 3), jnp.array([0, 255, 0]), jnp.uint8)
       border = border.at[T // 2:].set(jnp.array([255, 0, 0], jnp.uint8))
+    
       video = jnp.where(mask, video, border[None, :, None, None, :])
       video = jnp.concatenate([video, 0 * video[:, :10]], 1)
 
       B, T, H, W, C = video.shape
       grid = video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
       metrics[f'openloop/{key}'] = grid
-
-    carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
-    return carry, metrics
 
   def _apply_replay_context(self, carry, data):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry

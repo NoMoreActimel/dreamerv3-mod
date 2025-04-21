@@ -30,6 +30,7 @@ class RSSM(nj.Module):
   absolute: bool = False
   blocks: int = 8
   free_nats: float = 1.0
+  use_augmentations: bool = False
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -78,27 +79,49 @@ class RSSM(nj.Module):
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
 
-    print(f"Before dynamics._core call:")
-    print(f"deter.shape: {deter.shape},")
-    print(f"stoch.shape: {stoch.shape},")
-    print(f"action.shape: {action.shape}.")
+    # print(f"Before dynamics._core call:")
+    # print(f"deter.shape: {deter.shape},")
+    # print(f"stoch.shape: {stoch.shape},")
+    # print(f"action.shape: {action.shape}.")
       
     deter = self._core(deter, stoch, action)
 
-    print(f"Dynamics initial tokens.shape: {tokens.shape}")
-    tokens = tokens.reshape((*deter.shape[:-1], -1))
-    print(f"Dynamics tokens.shape after reshape deter.shape[:-1]: {tokens.shape}")
-    x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
-    print(f"Dynamics x.shape after concat with deter: {x.shape}")
+    # print(f"Dynamics initial tokens.shape: {tokens.shape}")
 
-    # TO-DO: ADD CROSS-ATTENTION HERE ?
+    # Cross-attn between tokens and deter in case of augmentations:
+    if self.use_augmentations:
+      # print(f"Using cross-attn between tokens of shape: {tokens.shape} and deter of shape {deter.shape}.")
+      # tokens.shape: (B, N, D_token)
+      q = self.sub('attn_q', nn.Linear, self.hidden, **self.kw)(deter)  # (B, H)
+      k = self.sub('attn_k', nn.Linear, self.hidden, **self.kw)(tokens) # (B, N, H)
+      v = self.sub('attn_v', nn.Linear, self.hidden, **self.kw)(tokens) # (B, N, H)
+
+      # print(f"q.shape: {q.shape}, k.shape: {k.shape}, v.shape: {v.shape}")
+  
+      q = q[:, None, :]  # (B, 1, H)
+      scale = 1.0 / jnp.sqrt(self.hidden)
+      logits = jnp.einsum('bqh,bkh->bqk', q, k) * scale    # (B, 1, N)
+      # print(f"logits.shape: {logits.shape}")
+      weights = jax.nn.softmax(logits, axis=-1)            # (B, 1, N)
+      # print(f"weights.shape: {weights.shape}")
+      context = jnp.einsum('bqk,bkv->bqv', weights, v)     # (B, 1, H)
+      # print(f"context.shape: {context.shape}")
+      context = context[:, 0, :]                           # (B, H)
+      # print(f"context.shape: {context.shape}")
+    else:
+      context = tokens.reshape((*deter.shape[:-1], -1))
+      # print(f"Dynamics tokens.shape after reshape deter.shape[:-1]: {context.shape}")
+    
+    x = tokens if self.absolute else jnp.concatenate([deter, context], -1)
+    # print(f"Dynamics x.shape after concat with deter: {x.shape}")
+
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-      print(f"Dynamics x.shape after obslayer {i + 1} / {self.obslayers}: {x.shape}")
+      # print(f"Dynamics x.shape after obslayer {i + 1} / {self.obslayers}: {x.shape}")
     
     logit = self._logit('obslogit', x)
-    print(f"Dynamics final logit.shape: {logit.shape}")
+    # print(f"Dynamics final logit.shape: {logit.shape}")
     
     stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
     carry = dict(deter=deter, stoch=stoch)
@@ -138,6 +161,12 @@ class RSSM(nj.Module):
     carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
     prior = self._prior(feat['deter'])
     post = feat['logit']
+
+    # print(f"Dynamics loss:")
+    # print(f"prior.shape: {prior.shape}")
+    # print(f"post.shape:  {post.shape}")
+    # print()
+    
     dyn = self._dist(sg(post)).kl(self._dist(prior))
     rep = self._dist(post).kl(self._dist(sg(prior)))
     if self.free_nats:
@@ -151,34 +180,60 @@ class RSSM(nj.Module):
   def _core(self, deter, stoch, action):
     stoch = stoch.reshape((stoch.shape[0], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
+    
     g = self.blocks
     flat2group = lambda x: einops.rearrange(x, '... (g h) -> ... g h', g=g)
     group2flat = lambda x: einops.rearrange(x, '... g h -> ... (g h)', g=g)
+    
+    # print(f"Dynamics _core")
+    
+    # print(f"deter.shape: {deter.shape}")
     x0 = self.sub('dynin0', nn.Linear, self.hidden, **self.kw)(deter)
     x0 = nn.act(self.act)(self.sub('dynin0norm', nn.Norm, self.norm)(x0))
+    # print(f"x0.shape (from deter): {x0.shape}")
+    
+    # print(f"stoch.shape: {stoch.shape}")
     x1 = self.sub('dynin1', nn.Linear, self.hidden, **self.kw)(stoch)
     x1 = nn.act(self.act)(self.sub('dynin1norm', nn.Norm, self.norm)(x1))
+    # print(f"x1.shape (from stoch): {x1.shape}")
+    
+    # print(f"action.shape: {action.shape}")
     x2 = self.sub('dynin2', nn.Linear, self.hidden, **self.kw)(action)
     x2 = nn.act(self.act)(self.sub('dynin2norm', nn.Norm, self.norm)(x2))
+    # print(f"x2.shape (from action): {x2.shape}")
+    
     x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
+    # print(f"x.shape after concat+repeat: {x.shape}")
+    
     x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
+    # print(f"x.shape after flat2group and group2flat: {x.shape}")
+    
     for i in range(self.dynlayers):
       x = self.sub(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'dynhid{i}norm', nn.Norm, self.norm)(x))
+      # print(f"x.shape dynlayer {i + 1} / {self.dynlayers}: {x.shape}")
     x = self.sub('dyngru', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
+    # print(f"x.shape after GRU: {x.shape}")
+    
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
+    # print(f"reset.shape: {reset.shape}")
+    # print(f"cand.shape: {cand.shape}")
+    # print(f"update.shape: {update.shape}")
+    
     reset = jax.nn.sigmoid(reset)
     cand = jnp.tanh(reset * cand)
     update = jax.nn.sigmoid(update - 1)
+    
     deter = update * cand + (1 - update) * deter
+    # print(f"Final deter.shape: {reset.shape}")
     return deter
 
   def _prior(self, feat):
     x = feat
     for i in range(self.imglayers):
       x = self.sub(f'prior{i}', nn.Linear, self.hidden, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))
+      x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))    
     return self._logit('priorlogit', x)
 
   def _logit(self, name, x):
@@ -204,6 +259,7 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
+  use_augmentations: bool = False
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
@@ -223,17 +279,18 @@ class Encoder(nj.Module):
   def truncate(self, entries, carry=None):
     return {}
 
-  def __call__(self, carry, obs, reset, training, single=False, augmented=False):
+  def __call__(self, carry, obs, reset, training, single=False):
     bdims = 1 if single else 2
     outs = []
     bshape = reset.shape
     
-    if augmented:
+    if self.use_augmentations:
       bdims = bdims + 1
       bshape = bshape + (obs[self.imgkeys[0]].shape[2], )
-      
-    print(f"bdims: {bdims}, bshape: {bshape}")
-    print(type(bshape))
+
+    # print("Encoder __call__")
+    # print(f"bdims: {bdims}, bshape: {bshape}")
+    # print(type(bshape))
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -252,9 +309,9 @@ class Encoder(nj.Module):
       assert all(x.dtype == jnp.uint8 for x in imgs)
 
       x = nn.cast(jnp.concatenate(imgs, -1), force=True) / 255 - 0.5
-      print(f"x before reshape bdims: {x.shape}")
+      # print(f"x before reshape bdims: {x.shape}")
       x = x.reshape((-1, *x.shape[bdims:]))
-      print(f"x after reshape bdims: {x.shape}")
+      # print(f"x after reshape bdims: {x.shape}")
       
       for i, depth in enumerate(self.depths):
         if self.outer and i == 0:
@@ -266,17 +323,18 @@ class Encoder(nj.Module):
           B, H, W, C = x.shape
           x = x.reshape((B, H // 2, 2, W // 2, 2, C)).max((2, 4))
         x = nn.act(self.act)(self.sub(f'cnn{i}norm', nn.Norm, self.norm)(x))
-        print(f"x after layer {i + 1} / {len(self.depths)}: {x.shape}")
+        # print(f"x after layer {i + 1} / {len(self.depths)}: {x.shape}")
       assert 3 <= x.shape[-3] <= 16, x.shape
       assert 3 <= x.shape[-2] <= 16, x.shape
       x = x.reshape((x.shape[0], -1))
-      print(f"x after reshape(x.shape[0], -1): {x.shape}")
+      # print(f"x after reshape(x.shape[0], -1): {x.shape}")
       outs.append(x)
 
     x = jnp.concatenate(outs, -1)
-    print(f"x after concat on -1: {x.shape}")
+    # print(f"x after concat on -1: {x.shape}")
     tokens = x.reshape((*bshape, *x.shape[1:]))
-    print(f"x after reshaping back to bshape: {tokens.shape}")
+    # print(f"x after reshaping back to bshape: {tokens.shape}")
+    # print()
     entries = {}
     return carry, entries, tokens
 
@@ -295,6 +353,8 @@ class Decoder(nj.Module):
   bspace: int = 8
   outer: bool = False
   strided: bool = False
+  use_augmentations: bool = False
+  aug_channels: int = 8
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
@@ -322,14 +382,15 @@ class Decoder(nj.Module):
     recons = {}
     bshape = reset.shape
 
-    print("feat.shape:", [feat[k].shape for k in ('stoch', 'deter')])
-    
-    if augmented:
-      bshape = bshape + (feat['deter'].shape[2], )
+    # print("Decoder __call__:")
+    # print("feat.shape:", [feat[k].shape for k in ('stoch', 'deter')])
     
     inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
+
+    if self.use_augmentations:
+      bshape = bshape + (self.aug_channels, )
 
     if self.veckeys:
       spaces = {k: self.obs_space[k] for k in self.veckeys}
@@ -348,23 +409,54 @@ class Decoder(nj.Module):
       assert 3 <= minres[0] <= 16, minres
       assert 3 <= minres[1] <= 16, minres
       shape = (*minres, self.depths[-1])
+      # print(f"Goal shape: {shape}")
+      
       if self.bspace:
         u, g = math.prod(shape), self.bspace
-        x0, x1 = nn.cast((feat['deter'], feat['stoch']))
+        
+        x0, x1 = nn.cast((feat['deter'], feat['stoch']))  
         x1 = x1.reshape((*x1.shape[:-2], -1))
+        
         x0 = x0.reshape((-1, x0.shape[-1]))
         x1 = x1.reshape((-1, x1.shape[-1]))
+        
+        # print(f"x0.shape after reshapes: {x0.shape}")
+        # print(f"x1.shape after reshapes: {x1.shape}")
+        
         x0 = self.sub('sp0', nn.BlockLinear, u, g, **self.kw)(x0)
         x0 = einops.rearrange(
             x0, '... (g h w c) -> ... h w (g c)',
             h=minres[0], w=minres[1], g=g)
+        
+        # print(f"x0.shape after block linear + einops: {x0.shape}")
+        
         x1 = self.sub('sp1', nn.Linear, 2 * self.units, **self.kw)(x1)
         x1 = nn.act(self.act)(self.sub('sp1norm', nn.Norm, self.norm)(x1))
         x1 = self.sub('sp2', nn.Linear, shape, **self.kw)(x1)
+        # print(f"x1.shape after linears: {x1.shape}")
+        
         x = nn.act(self.act)(self.sub('spnorm', nn.Norm, self.norm)(x0 + x1))
+        # print(f"x.shape norm combined: {x.shape}")
       else:
         x = self.sub('space', nn.Linear, shape, **kw)(inp)
         x = nn.act(self.act)(self.sub('spacenorm', nn.Norm, self.norm)(x))
+      
+      if self.use_augmentations:
+        # xs_aug = []
+        # for aug_channel in range(self.aug_channels):
+        #   xs_aug.append(self.sub(f'aug_{aug_channel}', nn.Linear, shape[-1], **self.kw)(x))
+        # x = jnp.concatenate(xs_aug, -1)
+        
+        x = self.sub(f'aug', nn.Linear, self.aug_channels * shape[-1], **self.kw)(x)
+        # print(f"x.shape after aug-linear: {x.shape}")
+        
+        x = einops.rearrange(x, '... (g h) -> ... g h', g=self.aug_channels)
+        # print(f"x.shape after augmentations einops: {x.shape}")
+        
+        T, H, W, A, D = x.shape
+        x = x.transpose((0, 3, 1, 2, 4)).reshape(T * A, H, W, D)
+        # print(f"x.shape after augmentations: {x.shape}")
+      
       for i, depth in reversed(list(enumerate(self.depths[:-1]))):
         if self.strided:
           kw = dict(**self.kw, transp=True)
@@ -373,6 +465,8 @@ class Decoder(nj.Module):
           x = x.repeat(2, -2).repeat(2, -3)
           x = self.sub(f'conv{i}', nn.Conv2D, depth, K, **self.kw)(x)
         x = nn.act(self.act)(self.sub(f'conv{i}norm', nn.Norm, self.norm)(x))
+        # print(f"x.shape after {len(self.depths) - 1 - i} / {len(self.depths) - 1} layer: {x.shape}")
+      
       if self.outer:
         kw = dict(**self.kw, outscale=self.outscale)
         x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
@@ -383,11 +477,15 @@ class Decoder(nj.Module):
         x = x.repeat(2, -2).repeat(2, -3)
         kw = dict(**self.kw, outscale=self.outscale)
         x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
+      
       x = jax.nn.sigmoid(x)
       x = x.reshape((*bshape, *x.shape[1:]))
-      print(f"Final x.shape in decoder: {x.shape}")
+      # print(f"Final x.shape in decoder: {x.shape}")
+      # print()
+      
       split = np.cumsum(
           [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])
+      
       for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
         out = embodied.jax.outs.MSE(out)
         out = embodied.jax.outs.Agg(out, 3, jnp.sum)
