@@ -106,12 +106,12 @@ class Agent(embodied.jax.Agent):
     return spaces
 
   def create_augmentations(self):
+    N_augmentations = self.augmentations_config.N_augmentations # self.dec.aug_channels - 1
     augmentation_names_kwargs = getattr(
       self.augmentations_config,
       "encoder_augmentations",
-      {"bounding_box": {"crop_rate": 2, "upsample": True}}
+      [{"bounding_box": {"crop_rate": 2, "upsample": True}} for _ in range(N_augmentations)]
     )
-    N_augmentations = self.augmentations_config.N_augmentations # self.dec.aug_channels - 1
 
     print(F"TRAINING WITH {N_augmentations} BOUNDING BOX AUGMENTATIONS")
 
@@ -119,55 +119,79 @@ class Agent(embodied.jax.Agent):
     for imgkey in self.imgkeys:
       H, W, C = self.enc.obs_space[imgkey].shape[-3:]
       self.augmentations[imgkey] = []
-      for name, kwargs in augmentation_names_kwargs.items():
-        for i in range(N_augmentations):
+      for i in range(N_augmentations):
+        for name, kwargs in augmentation_names_kwargs[i].items():
           self.augmentations[imgkey].append(self.get_aug(H, W, C, i, name, kwargs))
   
   @staticmethod
   def get_aug(H, W, C, aug_ind, aug_name, aug_kwargs):
-    def get_aug_bounding_box(crop_rate, upsample=False):
+    def get_aug_bounding_box(y=None, x=None, crop_rate=2, crop=True, upsample=False):
       crop_h, crop_w = H // crop_rate, W // crop_rate
 
       # sample x, y only on augmentation function creation
-      # key = nj.seed()
-      # y = int(jax.random.randint(key, (), 0, H - crop_h + 1))
-      # x = int(jax.random.randint(key, (), 0, W - crop_w + 1))
-      y = np.random.randint(0, H - crop_h + 1)
-      x = np.random.randint(0, W - crop_w + 1)
+      if y is None:
+        y = np.random.randint(0, H - crop_h + 1)
+      if x is None:
+        x = np.random.randint(0, W - crop_w + 1)
+
+      print(f"Augmentation {aug_ind + 1} is an upscaled crop of shape ({crop_h}, {crop_w}) starting from ({y}, {x}), original image shape: ({H}, {W})")
     
       def aug(imgs, y=y, x=x, ch=crop_h, cw=crop_w):
-        crop = imgs[..., y:y+ch, x:x+cw, :]
+        if crop:
+          imgs_new = imgs[..., y:y+ch, x:x+cw, :]
+        else:
+          imgs_new = jnp.zeros_like(imgs)
+          imgs_new[..., y:y+ch, x:x+cw, :] = imgs[..., y:y+ch, x:x+cw, :]
 
         if not upsample:
-          return crop
+          return imgs_new
         
         # resize back to (H, W)
         # jax.image.resize wants floats, so cast to f32, resize, then back to uint8
-        crop_f = crop.astype(f32) / 255.0
-        out = jax.image.resize(crop_f, imgs.shape, method='bilinear')
+        imgs_new_f = imgs_new.astype(f32) / 255.0
+        out = jax.image.resize(imgs_new_f, imgs.shape, method='bilinear')
         out = (out * 255).astype(np.uint8)
 
         return out
       return aug
 
-    def get_aug_fixed_half_bounding_box(upsample=False):
+    def get_aug_fixed_half_bounding_box(y=None, x=None, crop=True, upsample=False):
       crop_h, crop_w = H // 2, W // 2
-      y = ((aug_ind % 4) // 2) * (H // 2)
-      x = ((aug_ind % 4) % 2) * (W // 2)
+
+      # Computes predetermined positions if not provided with y and x:
+      # [1] [2]
+      # [3] [4]
+      if y is None:
+        y = ((aug_ind % 4) // 2) * (H // 2)
+      if x is None:
+        x = ((aug_ind % 4) % 2) * (W // 2)
     
       def aug(imgs, y=y, x=x, ch=crop_h, cw=crop_w):
-        crop = imgs[..., y:y+ch, x:x+cw, :]
+        if crop:
+          imgs_new = imgs[..., y:y+ch, x:x+cw, :]
+        else:
+          imgs_new = jnp.zeros_like(imgs)
+          imgs_new[..., y:y+ch, x:x+cw, :] = imgs[..., y:y+ch, x:x+cw, :]
 
         if not upsample:
-          return crop
+          return imgs_new
 
-        crop_f = crop.astype(f32) / 255.0
-        out = jax.image.resize(crop_f, imgs.shape, method='bilinear')
+        imgs_new_f = imgs_new.astype(f32) / 255.0
+        out = jax.image.resize(imgs_new_f, imgs.shape, method='bilinear')
         out = (out * 255).astype(np.uint8)
         return out
       return aug
 
+    def get_aug_horizontal_flip():
+      def aug(imgs):
+        return jnp.flip(imgs, axis=-2)
+      return aug
 
+    def get_aug_vertical_flip():
+      def aug(imgs):
+        return jnp.flip(imgs, axis=-3)
+      return aug
+    
     locals_dict = locals()
     get_aug_by_name = locals_dict.get(f"get_aug_{aug_name}", None)
     assert get_aug_by_name is not None, f"Augmentation {aug_name} not found!"
@@ -257,7 +281,7 @@ class Agent(embodied.jax.Agent):
 
       # otherwise all augmentations must be upscaled
       if getattr(self.augmentations_config, "stack_augmentations", False):
-        imgs_k_aug = self._stack_augmentations(imgs_k_aug)
+        imgs_k_aug = self._stack_augmentations(imgs_k_aug, imgs_k)
 
       if getattr(self.augmentations_config, "use_inital_image", True):
         imgs_k_aug = [imgs_k] + imgs_k_aug
@@ -270,7 +294,7 @@ class Agent(embodied.jax.Agent):
       # B, T, H, W, A, C = imgs_k_aug.shape
       # imgs_k_aug = imgs_k_aug.reshape(B, T, H, W, A * C)
 
-      # print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")
+      print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")
       
       obs[k] = imgs_k_aug
 
