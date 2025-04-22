@@ -169,9 +169,13 @@ class RSSM(nj.Module):
     
     dyn = self._dist(sg(post)).kl(self._dist(prior))
     rep = self._dist(post).kl(self._dist(sg(prior)))
+
     if self.free_nats:
+      metrics['raw_dyn_kl'] = dyn.mean()
+      metrics['raw_rep_kl'] = rep.mean()
       dyn = jnp.maximum(dyn, self.free_nats)
       rep = jnp.maximum(rep, self.free_nats)
+
     losses = {'dyn': dyn, 'rep': rep}
     metrics['dyn_ent'] = self._dist(prior).entropy().mean()
     metrics['rep_ent'] = self._dist(post).entropy().mean()
