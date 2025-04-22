@@ -6,6 +6,7 @@ import embodied.jax
 import embodied.jax.nets as nn
 import jax
 import jax.numpy as jnp
+import json
 import ninjax as nj
 import numpy as np
 import optax
@@ -110,10 +111,11 @@ class Agent(embodied.jax.Agent):
     augmentation_names_kwargs = getattr(
       self.augmentations_config,
       "encoder_augmentations",
-      [{"bounding_box": {"crop_rate": 2, "upsample": True}} for _ in range(N_augmentations)]
+      ['{"bounding_box": {"crop_rate": 2, "upsample": True}}' for _ in range(N_augmentations)]
     )
+    augmentation_names_kwargs = [json.loads(x) for x in augmentation_names_kwargs]
 
-    print(F"TRAINING WITH {N_augmentations} BOUNDING BOX AUGMENTATIONS")
+    print(F"TRAINING WITH {N_augmentations} AUGMENTATIONS: {augmentation_names_kwargs}")
 
     self.augmentations = {}
     for imgkey in self.imgkeys:

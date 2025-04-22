@@ -92,13 +92,10 @@ defaults:
     augmented_encode: True
     augmentations_config:
       N_augmentations: 3
-      encoder_augmentations: [
-        bounding_box: {y: 24, x: 0, crop_rate: 2, upsample: True},
-        bounding_box: {y: 24, x: 48, crop_rate: 2, upsample: True},
-        # fixed_half_bounding_box: {crop: True, upsample: True},
-        # fixed_half_bounding_box: {crop: True, upsample: True},
-        horizontal_flip: {}
-      ]
+      encoder_augmentations:
+      - '{"bounding_box": {"y": 24, "x": 0, "crop_rate": 2, "upsample": true}}'
+      - '{"bounding_box": {"y": 24, "x": 48, "crop_rate": 2, "upsample": true}}'
+      - '{"horizontal_flip": {}}'
       stack_augmentations: False
       n_stack_by_axis: 2
       use_inital_image: True
