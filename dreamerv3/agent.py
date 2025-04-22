@@ -55,8 +55,8 @@ class Agent(embodied.jax.Agent):
     self.imgkeys = [k for k, s in enc_space.items() if len(s.shape) == 3] # self.enc.imgkeys
     if self.augmented_encode:
       self.augmentations_config = self.config.augmentations_config
-      self.augmention_processor = AugmentationProcessor(self.augmentations_config)
-      self.augmentations = self.augmention_processor.create_augmentations()
+      self.augmention_processor = AugmentationProcessor(self.augmentations_config, self.imgkeys)
+      self.augmentations = self.augmention_processor.create_augmentations(self.enc.obs_space)
     
     self.feat2tensor = lambda x: jnp.concatenate([
         nn.cast(x['deter']),

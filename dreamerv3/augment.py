@@ -6,11 +6,12 @@ import numpy as np
 f32 = jnp.float32
 
 class AugmentationProcessor:
-  def __init__(self, augmentations_config):
+  def __init__(self, augmentations_config, imgkeys):
     self.augmentations_config = augmentations_config
     self.augmentations = {}
+    self.imgkeys = imgkeys
 
-  def create_augmentations(self, imgkeys, obs_space):
+  def create_augmentations(self, obs_space):
     N_augmentations = self.augmentations_config.N_augmentations
     augmentation_names_kwargs = getattr(
       self.augmentations_config,
@@ -22,7 +23,7 @@ class AugmentationProcessor:
     print(F"TRAINING WITH {N_augmentations} AUGMENTATIONS: {augmentation_names_kwargs}")
 
     self.augmentations = {}
-    for imgkey in imgkeys:
+    for imgkey in self.imgkeys:
       H, W, C = obs_space[imgkey].shape[-3:]
       self.augmentations[imgkey] = []
       for i in range(N_augmentations):
@@ -175,6 +176,6 @@ class AugmentationProcessor:
     get_aug_by_name = getattr(self, f"get_aug_{aug_name}", None)
     assert get_aug_by_name is not None, f"Augmentation {aug_name} not found!"
     
-    aug = get_aug_by_name(**aug_kwargs)
+    aug = get_aug_by_name(H, W, aug_ind, **aug_kwargs)
     # print("AUG Function:", type(aug), aug)
     return aug
