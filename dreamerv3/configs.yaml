@@ -91,15 +91,17 @@ defaults:
     
     augmented_encode: True
     augmentations_config:
-      N_augmentations: 3
+      N_augmentations: 6
       encoder_augmentations:
       - '{"bounding_box": {"y": 24, "x": 0, "crop_rate": 2, "upsample": true}}'
       - '{"bounding_box": {"y": 24, "x": 48, "crop_rate": 2, "upsample": true}}'
+      - '{"random_shift": {"pad": 4}}'
+      - '{"random_shift": {"pad": 4}}'
       - '{"horizontal_flip": {}}'
+      - '{"vertical_flip": {}}'
       stack_augmentations: False
       n_stack_by_axis: 2
       use_inital_image: True
-    
     
     dyn:
       typ: rssm
@@ -109,7 +111,7 @@ defaults:
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False, use_augmentations: True}
     dec:
       typ: simple
-      simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False, use_augmentations: True, aug_channels: 4}
+      simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False, use_augmentations: True, aug_channels: 7}
     rewhead: {layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
     conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
     policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
