@@ -52,6 +52,7 @@ class Agent(embodied.jax.Agent):
     self.augmented_encode = self.config.augmented_encode
     self.imgkeys = [k for k, s in enc_space.items() if len(s.shape) == 3] # self.enc.imgkeys
     if self.augmented_encode:
+      self.augmentations_config = self.config.augmentations_config
       self.augmentions = self.create_augmentations()
     
     self.feat2tensor = lambda x: jnp.concatenate([
@@ -106,11 +107,11 @@ class Agent(embodied.jax.Agent):
 
   def create_augmentations(self):
     augmentation_names_kwargs = getattr(
-      self.config,
+      self.augmentations_config,
       "encoder_augmentations",
-      {"bounding_box": {"crop_rate": 2}}
+      {"bounding_box": {"crop_rate": 2, "upsample": True}}
     )
-    N_augmentations = self.dec.aug_channels - 1
+    N_augmentations = self.augmentations_config.N_augmentations # self.dec.aug_channels - 1
 
     print(F"TRAINING WITH {N_augmentations} BOUNDING BOX AUGMENTATIONS")
 
@@ -119,12 +120,12 @@ class Agent(embodied.jax.Agent):
       H, W, C = self.enc.obs_space[imgkey].shape[-3:]
       self.augmentations[imgkey] = []
       for name, kwargs in augmentation_names_kwargs.items():
-        for _ in range(N_augmentations):
-          self.augmentations[imgkey].append(self.get_aug(H, W, C, name, kwargs))
+        for i in range(N_augmentations):
+          self.augmentations[imgkey].append(self.get_aug(H, W, C, i, name, kwargs))
   
   @staticmethod
-  def get_aug(H, W, C, aug_name, aug_kwargs):
-    def get_aug_bounding_box(crop_rate):
+  def get_aug(H, W, C, aug_ind, aug_name, aug_kwargs):
+    def get_aug_bounding_box(crop_rate, upsample=False):
       crop_h, crop_w = H // crop_rate, W // crop_rate
 
       # sample x, y only on augmentation function creation
@@ -133,10 +134,12 @@ class Agent(embodied.jax.Agent):
       # x = int(jax.random.randint(key, (), 0, W - crop_w + 1))
       y = np.random.randint(0, H - crop_h + 1)
       x = np.random.randint(0, W - crop_w + 1)
-
     
       def aug(imgs, y=y, x=x, ch=crop_h, cw=crop_w):
         crop = imgs[..., y:y+ch, x:x+cw, :]
+
+        if not upsample:
+          return crop
         
         # resize back to (H, W)
         # jax.image.resize wants floats, so cast to f32, resize, then back to uint8
@@ -146,6 +149,24 @@ class Agent(embodied.jax.Agent):
 
         return out
       return aug
+
+    def get_aug_fixed_half_bounding_box(upsample=False):
+      crop_h, crop_w = H // 2, W // 2
+      y = ((aug_ind % 4) // 2) * (H // 2)
+      x = ((aug_ind % 4) % 2) * (W // 2)
+    
+      def aug(imgs, y=y, x=x, ch=crop_h, cw=crop_w):
+        crop = imgs[..., y:y+ch, x:x+cw, :]
+
+        if not upsample:
+          return crop
+
+        crop_f = crop.astype(f32) / 255.0
+        out = jax.image.resize(crop_f, imgs.shape, method='bilinear')
+        out = (out * 255).astype(np.uint8)
+        return out
+      return aug
+
 
     locals_dict = locals()
     get_aug_by_name = locals_dict.get(f"get_aug_{aug_name}", None)
@@ -199,24 +220,48 @@ class Agent(embodied.jax.Agent):
       out.update(elements.tree.flatdict(dict(
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
     return carry, act, out
+  
+  def _stack_augmentations(self, imgs_k_aug, imgs_k):
+    n_stack_by_axis = self.augmentations_config.n_stack_by_axis
+    current_stack = []
+    imgs_k_aug_stacked = []
+
+    H, W, _ = imgs_k.shape[-3:]
+    for aug in imgs_k_aug:
+      h, w, _ = aug.shape[-3:]
+      assert (h * n_stack_by_axis == H) and (w * n_stack_by_axis == W), \
+        f"Attempting to stack by each axis {n_stack_by_axis} augmentations with shapes ({h}, {w}), while the final image has shape ({H}, {W})"
+      
+      current_stack.append(aug)
+      if len(current_stack) == n_stack_by_axis * n_stack_by_axis:
+          img_stacked = []
+          for i in range(n_stack_by_axis):
+            img_stacked.append(jnp.concatenate([
+              current_stack[j]
+              for j in range(i * n_stack_by_axis, (i + 1) * n_stack_by_axis)
+            ], axis=-2))
+          img_stacked = jnp.concatenate(img_stacked, axis=-3)
+          imgs_k_aug_stacked.append(img_stacked)
+          current_stack = []
+
+    assert len(current_stack) == 0, \
+        f"Attempting to stack {len(imgs_k_aug)} augmentations, {n_stack_by_axis * n_stack_by_axis} per each image."
+    
+    return imgs_k_aug_stacked
 
   def _apply_augmentations(self, obs):
     imgs = {k: obs[k] for k in sorted(self.imgkeys)}
 
     for k, imgs_k in imgs.items():
-      # EACH IMG IS IN FACT A SEQUENCE OF IMAGES THAT HAS SHAPE: (1, 64, 96, 96, 1)
-      # Traced<ShapedArray(uint8[1,64,96,96,1])
-      # BATCH_SIZE: 1
-      # LENGTH: 64
-      # H x W: (96, 96)
-      # COLOR CHANNELS: 1
+      imgs_k_aug = [aug(imgs_k) for aug in self.augmentations[k]]
 
-      # WE WANT TO ADD K AUGMENTATIONS BY DIM = 2, RESULTING SHAPE SHOULD BE:
-      # (1, 64, K + 1, 96, 96, 1)
-      # IN CASE OF 4-DIMENSIONAL INPUT, IT IS DIM = 1 (WITHOUT LAST H + W + C)
-      
-      imgs_k_aug = [imgs_k] + [aug(imgs_k) for aug in self.augmentations[k]]
-      
+      # otherwise all augmentations must be upscaled
+      if getattr(self.augmentations_config, "stack_augmentations", False):
+        imgs_k_aug = self._stack_augmentations(imgs_k_aug)
+
+      if getattr(self.augmentations_config, "use_inital_image", True):
+        imgs_k_aug = [imgs_k] + imgs_k_aug
+    
       aug_axis = len(imgs_k.shape) - 3
       imgs_k_aug = [jnp.expand_dims(c, axis=aug_axis) for c in imgs_k_aug]
       imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=aug_axis)

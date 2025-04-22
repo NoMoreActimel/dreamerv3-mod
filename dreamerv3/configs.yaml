@@ -90,8 +90,15 @@ defaults:
     ac_grads: False
     
     augmented_encode: True
-    encoder_augmentations:
-      bounding_box: {crop_rate: 2}
+    augmentations_config:
+      N_augmentations: 4
+      encoder_augmentations:
+        bounding_box: {crop_rate: 2, upsample: False}
+        # fixed_half_bounding_box: {upsample: False}
+      stack_augmentations: True
+      n_stack_by_axis: 2
+      use_inital_image: True
+    
     
     dyn:
       typ: rssm
