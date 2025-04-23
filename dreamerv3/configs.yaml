@@ -106,6 +106,7 @@ defaults:
       - 0.25
       - 0.25
       - 0.25
+      allow_multiple_augmentations: True
       stack_augmentations: False
       n_stack_by_axis: 2
     

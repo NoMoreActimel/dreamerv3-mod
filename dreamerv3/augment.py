@@ -31,6 +31,7 @@ class AugmentationProcessor:
         for name, kwargs in augmentation_names_kwargs[i].items():
           self.augmentations[imgkey].append(self.get_aug(H, W, C, i, name, kwargs))
     
+    # sample augmentations if not concatenating
     if not getattr(self.augmentations_config, "concat_augmentations", False):
       self.augmentations_probs = {}
       for imgkey in self.imgkeys:
@@ -38,6 +39,10 @@ class AugmentationProcessor:
           self.augmentations_probs[imgkey] = self.augmentations_config.augmentations_probs
         else:
           self.augmentations_probs[imgkey] = [1 / (N_augmentations + 1) for _ in range(N_augmentations)]
+        
+        self.allow_multiple_augmentations = getattr(self.augmentations_config, "allow_multiple_augmentations", True)
+        if not self.allow_multiple_augmentations:
+          assert sum(self.augmentations_probs[imgkey]) <= 1.0
 
     return self.augmentations
   
@@ -91,11 +96,22 @@ class AugmentationProcessor:
         if getattr(self.augmentations_config, "use_inital_image", True):
           imgs_k_aug = [imgs_k] + imgs_k_aug
       else:
-        aug_ind = np.random.choice(len(self.augmentations[k]))
-        aug = self.augmentations[k][aug_ind]
-        imgs_k_aug = aug(imgs_k)
-        is_list = False
+        if self.allow_multiple_augmentations:
+          imgs_k_aug = imgs_k
+          for aug, p in zip(self.augmentations[k], self.augmentations_probs[k]):
+            if np.random.rand() < p:
+              imgs_k_aug = aug(imgs_k_aug)
+        else:
+          probs = list(self.augmentations_probs[k])
+          p_none = 1.0 - sum(probs)
+          aug_list = self.augmentations[k]
+          aug_list_with_none = aug_list + [lambda x: x]
 
+          probs_with_none = probs + [p_none]
+          idx = np.random.choice(len(aug_list_with_none), p=probs_with_none)
+          imgs_k_aug = aug_list_with_none[idx](imgs_k)
+        
+        is_list = False
         if getattr(self.augmentations_config, "use_inital_image", True):
           imgs_k_aug = [imgs_k] + imgs_k_aug
           is_list = True
