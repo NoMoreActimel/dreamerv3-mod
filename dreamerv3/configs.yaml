@@ -92,16 +92,23 @@ defaults:
     augmented_encode: True
     augmentations_config:
       N_augmentations: 6
+      use_inital_image: True
       encoder_augmentations:
-      - '{"bounding_box": {"y": 24, "x": 0, "crop_rate": 2, "upsample": true}}'
-      - '{"bounding_box": {"y": 24, "x": 48, "crop_rate": 2, "upsample": true}}'
-      - '{"random_shift": {"pad": 4}}'
-      - '{"random_shift": {"pad": 4}}'
+      - '{"bounding_box": {"fixed": true, "y": 24, "x": 0, "crop_rate": 2, "upsample": true}}'
+      - '{"bounding_box": {"fixed": true, "y": 24, "x": 48, "crop_rate": 2, "upsample": true}}'
+      - '{"random_shift": {"fixed": true, "pad": 4}}'
+      - '{"random_shift": {"fixed": true, "pad": 4}}'
       - '{"horizontal_flip": {}}'
       - '{"vertical_flip": {}}'
+      augmentations_on_inference: True
+      concat_augmentations: True
+      expand_aug_axis: True
+      augmentations_probs:
+      - 0.25
+      - 0.25
+      - 0.25
       stack_augmentations: False
       n_stack_by_axis: 2
-      use_inital_image: True
     
     dyn:
       typ: rssm

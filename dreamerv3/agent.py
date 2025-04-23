@@ -57,6 +57,12 @@ class Agent(embodied.jax.Agent):
       self.augmentations_config = self.config.augmentations_config
       self.augmention_processor = AugmentationProcessor(self.augmentations_config, self.imgkeys)
       self.augmentations = self.augmention_processor.create_augmentations(self.enc.obs_space)
+      self.augmentations_expand_axis = \
+        getattr(self.augmentations_config, "concat_augmentations", False) or \
+        getattr(self.augmentations_config, "expand_aug_axis", False)
+      self.augmentations_on_inference = \
+        getattr(self.augmentations_config, "augmentations_on_inference", True) or \
+        getattr(self.augmentations_config, "concat_augmentations", False)
     
     self.feat2tensor = lambda x: jnp.concatenate([
         nn.cast(x['deter']),
@@ -158,6 +164,9 @@ class Agent(embodied.jax.Agent):
 
   def _apply_augmentations(self, obs):
     return self.augmention_processor._apply_augmentations(obs)
+  
+  def _expand_aug_axis(self, obs):
+    return self.augmention_processor._expand_aug_axis(obs)
 
   def train(self, carry, data):
     # print("before apply context:")
@@ -177,7 +186,10 @@ class Agent(embodied.jax.Agent):
     # print("TRAIN")
     # print(f"obs['image'].shape: {obs['image'].shape}")
     if self.augmented_encode:
-      obs = self._apply_augmentations(obs)
+      if self.augmentations_on_inference:
+        obs = self._apply_augmentations(obs)
+      elif self.augmentations_expand_axis:
+        obs = self._expand_aug_axis(obs)
     # print(f"obs['image'].shape: {obs['image'].shape}")
 
     metrics, (carry, entries, outs, mets) = self.opt(
@@ -236,7 +248,7 @@ class Agent(embodied.jax.Agent):
     metrics.update(mets)
 
     dec_carry, dec_entries, recons = self.dec(
-        dec_carry, repfeat, reset, training, augmented=self.augmented_encode
+        dec_carry, repfeat, reset, training
     )
 
     # print("after decoder:")
@@ -260,7 +272,7 @@ class Agent(embodied.jax.Agent):
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
 
-      if self.augmented_encode:
+      if self.augmented_encode and self.augmentations_expand_axis:
         losses[key] = losses[key].mean(2)
 
     B, T = reset.shape
@@ -338,7 +350,10 @@ class Agent(embodied.jax.Agent):
     metrics = {}
 
     if self.augmented_encode:
-      obs = self._apply_augmentations(obs)
+      if self.augmentations_on_inference:
+        obs = self._apply_augmentations(obs)
+      elif self.augmentations_expand_axis:
+        obs = self._expand_aug_axis(obs)
       
     # Train metrics
     _, (new_carry, entries, outs, mets) = self.loss(
@@ -379,7 +394,7 @@ class Agent(embodied.jax.Agent):
 
       obsrecon_pred, imgrecon_pred = obsrecons[key].pred(), imgrecons[key].pred()
       
-      if self.augmented_encode:
+      if self.augmented_encode and self.augmentations_expand_axis:
         aug_channels = self.dec.aug_channels
         # print(f"obsrecon_pred.shape: {obsrecon_pred.shape}")
         # print(f"imgrecon_pred.shape: {imgrecon_pred.shape}")

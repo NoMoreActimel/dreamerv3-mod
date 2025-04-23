@@ -30,7 +30,7 @@ class RSSM(nj.Module):
   absolute: bool = False
   blocks: int = 8
   free_nats: float = 1.0
-  use_augmentations: bool = False
+  aug_channels: int = 0
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -89,7 +89,7 @@ class RSSM(nj.Module):
     # print(f"Dynamics initial tokens.shape: {tokens.shape}")
 
     # Cross-attn between tokens and deter in case of augmentations:
-    if self.use_augmentations:
+    if self.aug_channels > 0:
       # print(f"Using cross-attn between tokens of shape: {tokens.shape} and deter of shape {deter.shape}.")
       # tokens.shape: (B, N, D_token)
       q = self.sub('attn_q', nn.Linear, self.hidden, **self.kw)(deter)  # (B, H)
@@ -263,7 +263,7 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
-  use_augmentations: bool = False
+  aug_channels: int = 0
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
@@ -288,7 +288,7 @@ class Encoder(nj.Module):
     outs = []
     bshape = reset.shape
     
-    if self.use_augmentations:
+    if self.aug_channels > 0:
       bdims = bdims + 1
       bshape = bshape + (obs[self.imgkeys[0]].shape[bdims - 1], )
 
@@ -357,8 +357,7 @@ class Decoder(nj.Module):
   bspace: int = 8
   outer: bool = False
   strided: bool = False
-  use_augmentations: bool = False
-  aug_channels: int = 8
+  aug_channels: int = 0
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
@@ -380,7 +379,7 @@ class Decoder(nj.Module):
   def truncate(self, entries, carry=None):
     return {}
 
-  def __call__(self, carry, feat, reset, training, single=False, augmented=False):
+  def __call__(self, carry, feat, reset, training, single=False):
     assert feat['deter'].shape[-1] % self.bspace == 0
     K = self.kernel
     recons = {}
@@ -393,7 +392,7 @@ class Decoder(nj.Module):
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
 
-    if self.use_augmentations:
+    if self.aug_channels > 0:
       bshape = bshape + (self.aug_channels, )
 
     if self.veckeys:
@@ -445,7 +444,7 @@ class Decoder(nj.Module):
         x = self.sub('space', nn.Linear, shape, **kw)(inp)
         x = nn.act(self.act)(self.sub('spacenorm', nn.Norm, self.norm)(x))
       
-      if self.use_augmentations:
+      if self.aug_channels > 0:
         # xs_aug = []
         # for aug_channel in range(self.aug_channels):
         #   xs_aug.append(self.sub(f'aug_{aug_channel}', nn.Linear, shape[-1], **self.kw)(x))
