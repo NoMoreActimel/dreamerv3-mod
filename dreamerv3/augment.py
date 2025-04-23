@@ -32,7 +32,7 @@ class AugmentationProcessor:
           self.augmentations[imgkey].append(self.get_aug(H, W, C, i, name, kwargs))
     
     if not getattr(self.augmentations_config, "concat_augmentations", False):
-      self.augmentation_probs = {}
+      self.augmentations_probs = {}
       for imgkey in self.imgkeys:
         if hasattr(self.augmentations_config, "augmentations_probs"):
           self.augmentations_probs[imgkey] = self.augmentations_config.augmentations_probs
@@ -80,8 +80,10 @@ class AugmentationProcessor:
     imgs = {k: obs[k] for k in sorted(self.imgkeys)}
 
     for k, imgs_k in imgs.items():
-      if getattr(self.augmentation_config, "concat_augmentations", True):
+      if getattr(self.augmentations_config, "concat_augmentations", True):
         imgs_k_aug = [aug(imgs_k) for aug in self.augmentations[k]]
+        is_list = True
+
         # otherwise all augmentations must be upscaled
         if getattr(self.augmentations_config, "stack_augmentations", False):
           imgs_k_aug = self._stack_augmentations(imgs_k_aug, imgs_k)
@@ -89,17 +91,20 @@ class AugmentationProcessor:
         if getattr(self.augmentations_config, "use_inital_image", True):
           imgs_k_aug = [imgs_k] + imgs_k_aug
       else:
-        aug = np.random.choice(self.augmentations)
-        imgs_k_aug = aug
+        aug_ind = np.random.choice(len(self.augmentations[k]))
+        aug = self.augmentations[k][aug_ind]
+        imgs_k_aug = aug(imgs_k)
+        is_list = False
 
         if getattr(self.augmentations_config, "use_inital_image", True):
           imgs_k_aug = [imgs_k] + imgs_k_aug
+          is_list = True
         
-      if len(imgs_k_aug) > 1 or getattr(self.augmentations_config, "expand_aug_axis", True):
+      if is_list or getattr(self.augmentations_config, "expand_aug_axis", True):
         aug_axis = len(imgs_k.shape) - 3
         imgs_k_aug = [jnp.expand_dims(c, axis=aug_axis) for c in imgs_k_aug]
       
-      if len(imgs_k_aug) > 1:
+      if is_list:
         imgs_k_aug = jnp.concatenate(imgs_k_aug, axis=aug_axis)
 
       print(f"Changed shape from {imgs_k.shape} to {imgs_k_aug.shape}")

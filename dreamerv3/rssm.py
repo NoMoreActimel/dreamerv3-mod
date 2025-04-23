@@ -31,6 +31,7 @@ class RSSM(nj.Module):
   blocks: int = 8
   free_nats: float = 1.0
   aug_channels: int = 0
+  use_cross_attn: bool = True
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -90,24 +91,11 @@ class RSSM(nj.Module):
 
     # Cross-attn between tokens and deter in case of augmentations:
     if self.aug_channels > 0:
-      # print(f"Using cross-attn between tokens of shape: {tokens.shape} and deter of shape {deter.shape}.")
-      # tokens.shape: (B, N, D_token)
-      q = self.sub('attn_q', nn.Linear, self.hidden, **self.kw)(deter)  # (B, H)
-      k = self.sub('attn_k', nn.Linear, self.hidden, **self.kw)(tokens) # (B, N, H)
-      v = self.sub('attn_v', nn.Linear, self.hidden, **self.kw)(tokens) # (B, N, H)
-
-      # print(f"q.shape: {q.shape}, k.shape: {k.shape}, v.shape: {v.shape}")
-  
-      q = q[:, None, :]  # (B, 1, H)
-      scale = 1.0 / jnp.sqrt(self.hidden)
-      logits = jnp.einsum('bqh,bkh->bqk', q, k) * scale    # (B, 1, N)
-      # print(f"logits.shape: {logits.shape}")
-      weights = jax.nn.softmax(logits, axis=-1)            # (B, 1, N)
-      # print(f"weights.shape: {weights.shape}")
-      context = jnp.einsum('bqk,bkv->bqv', weights, v)     # (B, 1, H)
-      # print(f"context.shape: {context.shape}")
-      context = context[:, 0, :]                           # (B, H)
-      # print(f"context.shape: {context.shape}")
+      if self.use_cross_attn:
+        context = self._cross_attn_on_tokens(deter, tokens)
+      else:
+        B, N, D = tokens.shape
+        context = tokens.reshape((B, N * D))
     else:
       context = tokens.reshape((*deter.shape[:-1], -1))
       # print(f"Dynamics tokens.shape after reshape deter.shape[:-1]: {context.shape}")
@@ -129,6 +117,27 @@ class RSSM(nj.Module):
     entry = dict(deter=deter, stoch=stoch)
     assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
     return carry, (entry, feat)
+  
+  def _cross_attn_on_tokens(self, deter, tokens):
+    # print(f"Using cross-attn between tokens of shape: {tokens.shape} and deter of shape {deter.shape}.")
+    # tokens.shape: (B, N, D_token)
+    q = self.sub('attn_q', nn.Linear, self.hidden, **self.kw)(deter)  # (B, H)
+    k = self.sub('attn_k', nn.Linear, self.hidden, **self.kw)(tokens) # (B, N, H)
+    v = self.sub('attn_v', nn.Linear, self.hidden, **self.kw)(tokens) # (B, N, H)
+
+    # print(f"q.shape: {q.shape}, k.shape: {k.shape}, v.shape: {v.shape}")
+
+    q = q[:, None, :]  # (B, 1, H)
+    scale = 1.0 / jnp.sqrt(self.hidden)
+    logits = jnp.einsum('bqh,bkh->bqk', q, k) * scale    # (B, 1, N)
+    # print(f"logits.shape: {logits.shape}")
+    weights = jax.nn.softmax(logits, axis=-1)            # (B, 1, N)
+    # print(f"weights.shape: {weights.shape}")
+    context = jnp.einsum('bqk,bkv->bqv', weights, v)     # (B, 1, H)
+    # print(f"context.shape: {context.shape}")
+    context = context[:, 0, :]                           # (B, H)
+    # print(f"context.shape: {context.shape}")
+    return context
 
   def imagine(self, carry, policy, length, training, single=False):
     if single:
