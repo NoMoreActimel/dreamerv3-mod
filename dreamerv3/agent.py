@@ -270,9 +270,13 @@ class Agent(embodied.jax.Agent):
       # print(key, space, value.shape)
       assert value.dtype == space.dtype, (key, space, value.dtype)
       target = f32(value) / 255 if isimage(space) else value
+
+      if self.dec.aug_channels == 0 and self.augmentations_expand_axis:
+        target = target[:, :, 0, :, :]
+        
       losses[key] = recon.loss(sg(target))
 
-      if self.augmented_encode and self.augmentations_expand_axis:
+      if self.augmented_encode and self.augmentations_expand_axis and self.dec.aug_channels > 0:
         losses[key] = losses[key].mean(2)
 
     B, T = reset.shape
