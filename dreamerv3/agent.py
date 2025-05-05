@@ -63,6 +63,12 @@ class Agent(embodied.jax.Agent):
       self.augmentations_on_inference = \
         getattr(self.augmentations_config, "augmentations_on_inference", True) or \
         getattr(self.augmentations_config, "concat_augmentations", False)
+    else:
+      self.augmentations_config = None
+      self.augmention_processor = None
+      self.augmentations = None
+      self.augmentations_expand_axis = False
+      self.augmentations_on_inference = False
     
     self.feat2tensor = lambda x: jnp.concatenate([
         nn.cast(x['deter']),
