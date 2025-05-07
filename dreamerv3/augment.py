@@ -231,37 +231,43 @@ class AugmentationProcessor:
     def aug(imgs):
       return jnp.flip(imgs, axis=-3)
     return aug
-  
 
   @staticmethod
-  def get_aug_temporal_difference(H, W, aug_ind, delta_t):
+  def get_aug_temporal_difference(H, W, aug_ind, delta_t, leave_initial=False):
     """
     Compute temporal differences along the time axis: img[t] - img[t - delta_t].
-    For t < delta_t, outputs zeros to preserve the time dimension.
+    For t < delta_t, outputs zeros (or original frames if leave_initial=True)
+    to preserve the time dimension.
     """
-    def aug(imgs, delta_t=delta_t):
-      # imgs shape: (..., T, H, W, C) or (T, H, W, C)
-      # Last three dims are H, W, C, so time axis is imgs.ndim - 4
+    def aug(imgs, delta_t=delta_t, leave_initial=leave_initial):
+      # Determine the time axis (time dimension just before height, width, channel)
       time_axis = imgs.ndim - 4
       td = delta_t
-      # Zeros for the first td frames
+
+      # Slice object selecting the first td frames along the time axis
       zero_slices = [slice(None)] * imgs.ndim
       zero_slices[time_axis] = slice(0, td)
-      zeros = jnp.zeros_like(imgs[tuple(zero_slices)])
+      # Either keep original frames or zero-out based on flag
+      if leave_initial:
+        first = imgs[tuple(zero_slices)]
+      else:
+        first = jnp.zeros_like(imgs[tuple(zero_slices)])
 
-      # Differences for remaining frames
+      # Compute differences for remaining frames
       curr_slices = [slice(None)] * imgs.ndim
       curr_slices[time_axis] = slice(td, None)
+
       prev_slices = [slice(None)] * imgs.ndim
       prev_slices[time_axis] = slice(0, -td)
+      
       part_curr = imgs[tuple(curr_slices)]
       part_prev = imgs[tuple(prev_slices)]
       diffs = part_curr - part_prev
 
-      # Concatenate to restore original time length
-      return jnp.concatenate([zeros, diffs], axis=time_axis)
+      # Concatenate initial segment (first) with differences
+      return jnp.concatenate([first, diffs], axis=time_axis)
     return aug
-    
+  
   def get_aug(self, H, W, C, aug_ind, aug_name, aug_kwargs):
     get_aug_by_name = getattr(self, f"get_aug_{aug_name}", None)
     assert get_aug_by_name is not None, f"Augmentation {aug_name} not found!"
